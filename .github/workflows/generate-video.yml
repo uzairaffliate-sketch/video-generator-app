@@ -1,0 +1,167 @@
+name: Generate Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Database job ID (UUID)"
+        required: true
+        type: string
+      script_text:
+        description: "Full script for voiceover"
+        required: true
+        type: string
+      drive_folder_id:
+        description: "Google Drive folder ID"
+        required: true
+        type: string
+      language:
+        description: "Voice language code (en, ur, hi, ar)"
+        required: false
+        default: "en"
+        type: string
+      callback_url:
+        description: "URL to notify when done (Next.js API)"
+        required: false
+        type: string
+
+jobs:
+  generate-video:
+    name: Generate Video - Job ${{ inputs.job_id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      # ── Step 1: Repo checkout ──────────────────────────────────────────────
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # ── Step 2: Python setup ───────────────────────────────────────────────
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── Step 3: FFmpeg install (Ubuntu mein free available) ────────────────
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -1
+
+      # ── Step 4: Python dependencies install ───────────────────────────────
+      - name: Install Python Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r python/requirements.txt
+          echo "✅ Dependencies installed"
+
+      # ── Step 5: Working directories banao ─────────────────────────────────
+      - name: Create Working Directories
+        run: |
+          mkdir -p /tmp/work/images
+          mkdir -p /tmp/work/audio
+          mkdir -p /tmp/work/output
+          echo "✅ Directories created"
+
+      # ── Step 6: Script file save karo ─────────────────────────────────────
+      - name: Save Script to File
+        run: |
+          cat > /tmp/work/script.txt << 'SCRIPT_EOF'
+          ${{ inputs.script_text }}
+          SCRIPT_EOF
+          echo "✅ Script saved ($(wc -w < /tmp/work/script.txt) words)"
+
+      # ── Step 7: Google Drive se images download ────────────────────────────
+      - name: Download Images from Google Drive
+        run: |
+          echo "📥 Downloading images from Drive folder: ${{ inputs.drive_folder_id }}"
+          python python/drive_fetcher.py \
+            "${{ inputs.drive_folder_id }}" \
+            "/tmp/work/images"
+          
+          IMAGE_COUNT=$(ls /tmp/work/images/*.jpg /tmp/work/images/*.jpeg /tmp/work/images/*.png 2>/dev/null | wc -l)
+          echo "✅ Downloaded $IMAGE_COUNT images"
+          
+          if [ "$IMAGE_COUNT" -eq "0" ]; then
+            echo "❌ No images downloaded! Check Drive folder is public."
+            exit 1
+          fi
+
+      # ── Step 8: Script aur images match karo ──────────────────────────────
+      - name: Match Script to Images
+        run: |
+          echo "🔗 Matching script segments to images..."
+          python python/image_matcher.py \
+            "/tmp/work/script.txt" \
+            "/tmp/work/images/downloaded_files.json" \
+            "/tmp/work/matched.json"
+          
+          SEGMENTS=$(python -c "import json; d=json.load(open('/tmp/work/matched.json')); print(d['total_segments'])")
+          echo "✅ Created $SEGMENTS segments"
+
+      # ── Step 9: Voiceover generate karo ───────────────────────────────────
+      - name: Generate Voiceover (gTTS)
+        run: |
+          echo "🎙️ Generating voiceover in language: ${{ inputs.language }}"
+          python python/voice_generator.py \
+            "/tmp/work/script.txt" \
+            "/tmp/work/audio/voiceover.mp3" \
+            "${{ inputs.language }}"
+          
+          AUDIO_SIZE=$(du -sh /tmp/work/audio/voiceover.mp3 | cut -f1)
+          echo "✅ Audio generated: $AUDIO_SIZE"
+
+      # ── Step 10: Video render karo ─────────────────────────────────────────
+      - name: Render Video with Ken Burns Effect
+        run: |
+          echo "🎬 Rendering video..."
+          echo "Settings: libx264, 4000k, fps=25, preset=faster, tune=stillimage"
+          
+          python python/video_generator.py \
+            "/tmp/work/matched.json" \
+            "/tmp/work/audio/voiceover.mp3" \
+            "/tmp/work/output/final_video.mp4"
+          
+          if [ -f "/tmp/work/output/final_video.mp4" ]; then
+            VIDEO_SIZE=$(du -sh /tmp/work/output/final_video.mp4 | cut -f1)
+            echo "✅ Video rendered: $VIDEO_SIZE"
+          else
+            echo "❌ Video rendering failed!"
+            exit 1
+          fi
+
+      # ── Step 11: Artifact upload karo ─────────────────────────────────────
+      - name: Upload Video Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-${{ inputs.job_id }}
+          path: /tmp/work/output/final_video.mp4
+          retention-days: 90
+          if-no-files-found: error
+
+      # ── Step 12: Job metadata save karo ───────────────────────────────────
+      - name: Save Job Metadata
+        run: |
+          cat > /tmp/work/job_info.json << EOF
+          {
+            "job_id": "${{ inputs.job_id }}",
+            "status": "completed",
+            "run_id": "${{ github.run_id }}",
+            "artifact_name": "video-${{ inputs.job_id }}",
+            "language": "${{ inputs.language }}"
+          }
+          EOF
+          echo "✅ Job metadata saved"
+          cat /tmp/work/job_info.json
+
+      # ── Step 13: Failure handling ──────────────────────────────────────────
+      - name: Handle Failure
+        if: failure()
+        run: |
+          echo "❌ Workflow failed for job: ${{ inputs.job_id }}"
+          echo "Run ID: ${{ github.run_id }}"
+          ls -la /tmp/work/ || true
+          ls -la /tmp/work/images/ || true
+          ls -la /tmp/work/audio/ || true
