@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-file.io pe video upload karne ka simple script.
+0x0.st pe video upload karne ka simple script.
 Video upload ho jayegi aur download link mil jayega.
 """
 
@@ -10,8 +10,8 @@ import requests
 import json
 from pathlib import Path
 
-def upload_to_fileio(file_path, job_id):
-    """file.io pe video upload karo"""
+def upload_to_0x0(file_path, job_id):
+    """0x0.st pe video upload karo"""
     
     file_name = f"video_{job_id}.mp4"
     
@@ -23,38 +23,40 @@ def upload_to_fileio(file_path, job_id):
         print(f"❌ File not found: {file_path}")
         return None
     
-    # file.io pe upload karo
     try:
+        # 0x0.st pe upload karo
         with open(file_path, 'rb') as f:
             files = {'file': (file_name, f, 'video/mp4')}
             response = requests.post(
-                'https://file.io',
+                'https://0x0.st',
                 files=files,
                 timeout=300  # 5 minutes timeout
             )
         
+        # 0x0.st response mein seedha link return hota hai (plain text)
         if response.status_code == 200:
-            data = response.json()
+            link = response.text.strip()
             
-            if data.get('success'):
-                link = data.get('link')
-                expiry = data.get('expiry', 'N/A')
-                
+            # Check karo ke link valid hai
+            if link.startswith('http'):
                 print(f"✅ Upload Successful!")
                 print(f"🔗 Download Link: {link}")
-                print(f"⏰ Expires: {expiry}")
                 
                 # Link save karo
                 with open('/tmp/work/output/download_link.txt', 'w') as f:
                     f.write(link)
                 
-                # JSON format mein bhi save karo
+                # JSON format mein bhi save karo (for metadata)
                 with open('/tmp/work/output/upload_info.json', 'w') as f:
-                    json.dump(data, f, indent=2)
+                    json.dump({
+                        "success": True,
+                        "link": link,
+                        "job_id": job_id
+                    }, f, indent=2)
                 
                 return link
             else:
-                print(f"❌ Upload failed: {data.get('message', 'Unknown error')}")
+                print(f"❌ Upload failed: Unexpected response: {link}")
                 return None
         else:
             print(f"❌ Upload failed with status: {response.status_code}")
@@ -68,14 +70,14 @@ def upload_to_fileio(file_path, job_id):
 def main():
     if len(sys.argv) < 4:
         print("Usage: upload_to_drive.py <file_path> <folder_id> <job_id>")
-        print("Note: folder_id is not used for file.io, but kept for compatibility")
+        print("Note: folder_id is not used for 0x0.st, but kept for compatibility")
         sys.exit(1)
     
     file_path = sys.argv[1]
-    # folder_id = sys.argv[2]  # Not used for file.io
+    # folder_id = sys.argv[2]  # Not used
     job_id = sys.argv[3]
     
-    upload_to_fileio(file_path, job_id)
+    upload_to_0x0(file_path, job_id)
 
 if __name__ == "__main__":
     main()
