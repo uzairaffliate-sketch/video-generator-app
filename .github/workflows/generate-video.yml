@@ -32,32 +32,27 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      # ── Step 1: Repo checkout ──────────────────────────────────────────────
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ── Step 2: Python setup ───────────────────────────────────────────────
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      # ── Step 3: FFmpeg install ─────────────────────────────────────────────
       - name: Install FFmpeg
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           ffmpeg -version | head -1
 
-      # ── Step 4: Python dependencies install ───────────────────────────────
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
           pip install -r python/requirements.txt
           echo "✅ Dependencies installed"
 
-      # ── Step 5: Working directories banao ─────────────────────────────────
       - name: Create Working Directories
         run: |
           mkdir -p /tmp/work/images
@@ -65,7 +60,6 @@ jobs:
           mkdir -p /tmp/work/output
           echo "✅ Directories created"
 
-      # ── Step 6: Script file save karo ─────────────────────────────────────
       - name: Save Script to File
         run: |
           cat > /tmp/work/script.txt << 'SCRIPT_EOF'
@@ -73,7 +67,6 @@ jobs:
           SCRIPT_EOF
           echo "✅ Script saved ($(wc -w < /tmp/work/script.txt) words)"
 
-      # ── Step 7: Google Drive se images download ────────────────────────────
       - name: Download Images from Google Drive
         run: |
           echo "📥 Downloading images from Drive folder: ${{ inputs.drive_folder_id }}"
@@ -83,13 +76,11 @@ jobs:
           
           IMAGE_COUNT=$(ls /tmp/work/images/*.jpg /tmp/work/images/*.jpeg /tmp/work/images/*.png 2>/dev/null | wc -l)
           echo "✅ Downloaded $IMAGE_COUNT images"
-          
           if [ "$IMAGE_COUNT" -eq "0" ]; then
             echo "❌ No images downloaded! Check Drive folder is public."
             exit 1
           fi
 
-      # ── Step 8: Script aur images match karo ──────────────────────────────
       - name: Match Script to Images
         run: |
           echo "🔗 Matching script segments to images..."
@@ -97,11 +88,9 @@ jobs:
             "/tmp/work/script.txt" \
             "/tmp/work/images/downloaded_files.json" \
             "/tmp/work/matched.json"
-          
           SEGMENTS=$(python -c "import json; d=json.load(open('/tmp/work/matched.json')); print(d['total_segments'])")
           echo "✅ Created $SEGMENTS segments"
 
-      # ── Step 9: Voiceover generate karo ───────────────────────────────────
       - name: Generate Voiceover (gTTS)
         run: |
           echo "🎙️ Generating voiceover in language: ${{ inputs.language }}"
@@ -109,21 +98,17 @@ jobs:
             "/tmp/work/script.txt" \
             "/tmp/work/audio/voiceover.mp3" \
             "${{ inputs.language }}"
-          
           AUDIO_SIZE=$(du -sh /tmp/work/audio/voiceover.mp3 | cut -f1)
           echo "✅ Audio generated: $AUDIO_SIZE"
 
-      # ── Step 10: Video render karo ─────────────────────────────────────────
       - name: Render Video with Ken Burns Effect
         run: |
           echo "🎬 Rendering video..."
           echo "Settings: libx264, 4000k, fps=25, preset=faster, tune=stillimage"
-          
           python python/video_generator.py \
             "/tmp/work/matched.json" \
             "/tmp/work/audio/voiceover.mp3" \
             "/tmp/work/output/final_video.mp4"
-          
           if [ -f "/tmp/work/output/final_video.mp4" ]; then
             VIDEO_SIZE=$(du -sh /tmp/work/output/final_video.mp4 | cut -f1)
             echo "✅ Video rendered: $VIDEO_SIZE"
@@ -132,33 +117,31 @@ jobs:
             exit 1
           fi
 
-      # ── Step 11: Upload to 0x0.st with curl (Reliable, 10 min timeout) ──
-      - name: Upload Video to 0x0.st
+      # ── Step 11: Upload to catbox.moe (Reliable) ──────────────────────────
+      - name: Upload Video to catbox.moe
         run: |
-          echo "☁️ Uploading video to 0x0.st..."
+          echo "☁️ Uploading video to catbox.moe..."
           
-          # 10 minute timeout ke sath upload karo
-          curl --connect-timeout 60 --max-time 600 -F "file=@/tmp/work/output/final_video.mp4" \
-            https://0x0.st -o /tmp/work/output/upload_response.txt
+          # catbox.moe API (no auth, file limit ~200MB)
+          RESPONSE=$(curl -F "fileToUpload=@/tmp/work/output/final_video.mp4" \
+            -F "reqtype=fileupload" \
+            https://catbox.moe/user/api.php 2>/dev/null)
           
-          # Response mein link hoga
-          LINK=$(cat /tmp/work/output/upload_response.txt)
-          
-          if [[ "$LINK" == http* ]]; then
+          if [[ "$RESPONSE" == https://files.catbox.moe/* ]]; then
             echo "✅ Upload Successful!"
-            echo "🔗 Download Link: $LINK"
-            echo "$LINK" > /tmp/work/output/download_link.txt
-            echo "DOWNLOAD_LINK=$LINK" >> $GITHUB_ENV
+            echo "🔗 Download Link: $RESPONSE"
+            echo "$RESPONSE" > /tmp/work/output/download_link.txt
+            echo "DOWNLOAD_LINK=$RESPONSE" >> $GITHUB_ENV
           else
-            echo "❌ Upload failed. Response: $LINK"
-            echo "⚠️ Trying transfer.sh as fallback..."
+            echo "❌ Upload failed: $RESPONSE"
+            echo "⚠️ Trying file.io as fallback..."
             
-            # Fallback: transfer.sh (14 days valid)
-            curl --connect-timeout 60 --max-time 600 --upload-file /tmp/work/output/final_video.mp4 \
-              "https://transfer.sh/video_${{ inputs.job_id }}.mp4" -o /tmp/work/output/upload_response.txt
+            # Fallback: file.io (with 10 min timeout)
+            curl --connect-timeout 60 --max-time 600 -F "file=@/tmp/work/output/final_video.mp4" \
+              https://file.io -o /tmp/work/output/upload_response.txt
             
-            LINK=$(cat /tmp/work/output/upload_response.txt)
-            if [[ "$LINK" == http* ]]; then
+            LINK=$(cat /tmp/work/output/upload_response.txt | grep -o '"link":"[^"]*"' | cut -d'"' -f4)
+            if [[ -n "$LINK" ]]; then
               echo "✅ Upload Successful (fallback)!"
               echo "🔗 Download Link: $LINK"
               echo "$LINK" > /tmp/work/output/download_link.txt
@@ -180,7 +163,7 @@ jobs:
             echo "🔗 $LINK"
           fi
           echo "========================================"
-          echo "⏰ Link valid for 14 days (transfer.sh) or 30 days (0x0.st)"
+          echo "⏰ catbox.moe link is permanent (no expiry)"
           echo "========================================"
 
       # ── Step 13: Job metadata save karo ───────────────────────────────────
