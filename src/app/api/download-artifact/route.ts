@@ -7,10 +7,10 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPO =
   process.env.GITHUB_REPO || "uzairaffliate-sketch/video-generator-app";
 
-// ✅ CONSTANT: GitHub Actions workflow mein jo artifact name use ho raha hai
-// Agar workflow mein "video.mp4" hai toh yeh change karo
-const ARTIFACT_NAME = "video.mp4"; // or "final_video" or "video-artifact"
-// Agar dynamic name chahiye (jobId based) toh neeche function use karo
+// ✅ Artifact name dynamic hai - workflow mein "video-${{ inputs.job_id }}" use ho raha hai
+function getArtifactName(jobId: string) {
+  return `video-${jobId}`;
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -31,14 +31,14 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // ✅ Step 1: DB se job fetch karo
+    // Step 1: DB se job fetch karo
     const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
 
     if (!job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
-    // ✅ Step 2: Status check with proper handling
+    // Step 2: Status check with proper handling
     if (job.status === "queued" || job.status === "in_progress") {
       return NextResponse.json(
         {
@@ -47,7 +47,7 @@ export async function GET(req: NextRequest) {
           message: "Check back in a few minutes",
           estimatedTime: "2-5 minutes",
         },
-        { status: 202 } // ✅ 202 Accepted - Still processing (NOT 400!)
+        { status: 202 }
       );
     }
 
@@ -72,9 +72,9 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // ✅ Step 3: Artifact fetch karo (multiple name variations try karo)
+    // Step 3: Artifact fetch karo - dynamic name se
     const artifactNames = [
-      ARTIFACT_NAME,
+      getArtifactName(jobId), // ✅ Yeh pehle try hoga - "video-{jobId}"
       `video-${jobId}`,
       `${jobId}.mp4`,
       "final_video.mp4",
@@ -100,11 +100,11 @@ export async function GET(req: NextRequest) {
     }
 
     const listData = await listResponse.json();
-    
-    // ✅ Multiple names try karo
+
+    // Multiple names try karo
     let artifact = null;
     let foundName = "";
-    
+
     for (const name of artifactNames) {
       const found = listData.artifacts?.find(
         (a: { name: string; expired: boolean }) =>
@@ -117,7 +117,7 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // ✅ Agar artifact nahi mila, toh saare available artifacts show karo (debugging)
+    // Agar artifact nahi mila, toh saare available artifacts show karo (debugging)
     if (!artifact) {
       const availableArtifacts = listData.artifacts?.map((a: any) => a.name) || [];
       return NextResponse.json(
@@ -131,7 +131,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // ✅ Step 4: Success - Return download info
+    // Success - Return download info
     const downloadUrl = `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts/${artifact.id}/zip`;
 
     return NextResponse.json({
@@ -146,7 +146,7 @@ export async function GET(req: NextRequest) {
       githubDownloadUrl: `https://github.com/${GITHUB_REPO}/actions/runs/${job.workflowRunId}/artifacts/${artifact.id}`,
       note: "Use POST method or githubDownloadUrl to actually download the file",
     });
-    
+
   } catch (error) {
     console.error("Download artifact error:", error);
     return NextResponse.json(
@@ -156,7 +156,7 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// ✅ POST: Direct artifact download proxy (IMPROVED)
+// POST: Direct artifact download proxy
 export async function POST(req: NextRequest) {
   try {
     const { jobId } = await req.json();
@@ -175,7 +175,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ✅ Pehle DB se status check karo
+    // Pehle DB se status check karo
     const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
 
     if (!job) {
@@ -188,7 +188,7 @@ export async function POST(req: NextRequest) {
           error: "Video is still being generated",
           status: job.status,
         },
-        { status: 202 } // ✅ 202 Accepted
+        { status: 202 }
       );
     }
 
@@ -201,9 +201,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ✅ Multiple artifact names try karo
+    // Multiple artifact names try karo
     const artifactNames = [
-      ARTIFACT_NAME,
+      getArtifactName(jobId), // ✅ Dynamic name - "video-{jobId}"
       `video-${jobId}`,
       `${jobId}.mp4`,
       "final_video.mp4",
@@ -229,8 +229,7 @@ export async function POST(req: NextRequest) {
     }
 
     const listData = await listResponse.json();
-    
-    // ✅ Multiple names try karo
+
     let artifact = null;
     for (const name of artifactNames) {
       const found = listData.artifacts?.find(
@@ -255,7 +254,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ✅ Artifact download karo
+    // Artifact download karo
     const downloadResponse = await fetch(
       `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts/${artifact.id}/zip`,
       {
@@ -275,17 +274,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ✅ ZIP file stream karo
+    // ZIP file stream karo
     const blob = await downloadResponse.arrayBuffer();
 
     return new NextResponse(blob, {
       headers: {
         "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="video-${jobId}.zip"`,
+        "Content-Disposition": `attachment; filename="${getArtifactName(jobId)}.zip"`,
         "Content-Length": String(blob.byteLength),
       },
     });
-    
+
   } catch (error) {
     console.error("Proxy download error:", error);
     return NextResponse.json(
