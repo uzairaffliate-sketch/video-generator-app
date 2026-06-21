@@ -117,56 +117,60 @@ jobs:
             exit 1
           fi
 
-      # ── Step 11: Upload to catbox.moe (Reliable) ──────────────────────────
-      - name: Upload Video to catbox.moe
-        run: |
-          echo "☁️ Uploading video to catbox.moe..."
-          
-          # catbox.moe API (no auth, file limit ~200MB)
-          RESPONSE=$(curl -F "fileToUpload=@/tmp/work/output/final_video.mp4" \
-            -F "reqtype=fileupload" \
-            https://catbox.moe/user/api.php 2>/dev/null)
-          
-          if [[ "$RESPONSE" == https://files.catbox.moe/* ]]; then
-            echo "✅ Upload Successful!"
-            echo "🔗 Download Link: $RESPONSE"
-            echo "$RESPONSE" > /tmp/work/output/download_link.txt
-            echo "DOWNLOAD_LINK=$RESPONSE" >> $GITHUB_ENV
-          else
-            echo "❌ Upload failed: $RESPONSE"
-            echo "⚠️ Trying file.io as fallback..."
-            
-            # Fallback: file.io (with 10 min timeout)
-            curl --connect-timeout 60 --max-time 600 -F "file=@/tmp/work/output/final_video.mp4" \
-              https://file.io -o /tmp/work/output/upload_response.txt
-            
-            LINK=$(cat /tmp/work/output/upload_response.txt | grep -o '"link":"[^"]*"' | cut -d'"' -f4)
-            if [[ -n "$LINK" ]]; then
-              echo "✅ Upload Successful (fallback)!"
-              echo "🔗 Download Link: $LINK"
-              echo "$LINK" > /tmp/work/output/download_link.txt
-              echo "DOWNLOAD_LINK=$LINK" >> $GITHUB_ENV
-            else
-              echo "❌ Both upload methods failed."
-              exit 1
-            fi
-          fi
+      # ── Step 11: Upload as GitHub Artifact (Most Reliable) ──────────────
+      - name: Upload Video Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-${{ inputs.job_id }}
+          path: /tmp/work/output/final_video.mp4
+          retention-days: 90
+          if-no-files-found: error
 
-      # ── Step 12: Show Download Link ────────────────────────────────────────
-      - name: Show Download Link
+      # ── Step 12: Generate Direct Download Link ───────────────────────────
+      - name: Generate Download Link
+        id: get_link
+        run: |
+          echo "🔗 Generating download link..."
+          
+          # GitHub API se artifact ID fetch karo
+          ARTIFACT_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/artifacts" \
+            | jq -r --arg name "video-${{ inputs.job_id }}" '.artifacts[] | select(.name==$name) | .id')
+          
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "❌ Artifact not found!"
+            exit 1
+          fi
+          
+          # Direct download URL (valid 1 hour)
+          DOWNLOAD_URL="https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip"
+          echo "DOWNLOAD_URL=$DOWNLOAD_URL" >> $GITHUB_ENV
+          echo "ARTIFACT_ID=$ARTIFACT_ID" >> $GITHUB_ENV
+
+      # ── Step 13: Show Download Instructions ──────────────────────────────
+      - name: Show Download Instructions
         run: |
           echo "========================================"
           echo "🎬 VIDEO READY FOR DOWNLOAD"
           echo "========================================"
-          if [ -f "/tmp/work/output/download_link.txt" ]; then
-            LINK=$(cat /tmp/work/output/download_link.txt)
-            echo "🔗 $LINK"
-          fi
+          echo ""
+          echo "📌 OPTION 1: GitHub UI (Recommended)"
+          echo "   Go to: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "   Click on Artifacts → video-${{ inputs.job_id }} → Download"
+          echo ""
+          echo "📌 OPTION 2: API Link (Fast, 1 hour valid)"
+          echo "   ${{ env.DOWNLOAD_URL }}"
+          echo "   (Use this link in browser or curl)"
+          echo ""
+          echo "📌 OPTION 3: GitHub CLI (Fastest)"
+          echo "   gh run download ${{ github.run_id }} -n video-${{ inputs.job_id }}"
+          echo ""
           echo "========================================"
-          echo "⏰ catbox.moe link is permanent (no expiry)"
+          echo "⏰ Artifact available for 90 days"
+          echo "📦 File: video-${{ inputs.job_id }}.zip (contains MP4)"
           echo "========================================"
 
-      # ── Step 13: Job metadata save karo ───────────────────────────────────
+      # ── Step 14: Job metadata save karo ───────────────────────────────────
       - name: Save Job Metadata
         run: |
           cat > /tmp/work/job_info.json << EOF
@@ -174,14 +178,16 @@ jobs:
             "job_id": "${{ inputs.job_id }}",
             "status": "completed",
             "run_id": "${{ github.run_id }}",
-            "download_link": "$(cat /tmp/work/output/download_link.txt 2>/dev/null || echo 'N/A')",
+            "artifact_name": "video-${{ inputs.job_id }}",
+            "download_url": "${{ env.DOWNLOAD_URL }}",
+            "github_ui_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
             "language": "${{ inputs.language }}"
           }
           EOF
           echo "✅ Job metadata saved"
           cat /tmp/work/job_info.json
 
-      # ── Step 14: Failure handling ──────────────────────────────────────────
+      # ── Step 15: Failure handling ──────────────────────────────────────────
       - name: Handle Failure
         if: failure()
         run: |
