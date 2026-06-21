@@ -7,6 +7,11 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPO =
   process.env.GITHUB_REPO || "uzairaffliate-sketch/video-generator-app";
 
+// ✅ CONSTANT: GitHub Actions workflow mein jo artifact name use ho raha hai
+// Agar workflow mein "video.mp4" hai toh yeh change karo
+const ARTIFACT_NAME = "video.mp4"; // or "final_video" or "video-artifact"
+// Agar dynamic name chahiye (jobId based) toh neeche function use karo
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
@@ -26,28 +31,59 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // DB se job fetch karo
+    // ✅ Step 1: DB se job fetch karo
     const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
 
     if (!job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
+    // ✅ Step 2: Status check with proper handling
+    if (job.status === "queued" || job.status === "in_progress") {
+      return NextResponse.json(
+        {
+          error: "Video is still being generated. Please wait...",
+          status: job.status,
+          message: "Check back in a few minutes",
+          estimatedTime: "2-5 minutes",
+        },
+        { status: 202 } // ✅ 202 Accepted - Still processing (NOT 400!)
+      );
+    }
+
+    if (job.status === "failed") {
+      return NextResponse.json(
+        {
+          error: "Video generation failed",
+          status: job.status,
+          message: job.error_message || "Unknown error occurred",
+        },
+        { status: 500 }
+      );
+    }
+
     if (job.status !== "completed") {
       return NextResponse.json(
         {
-          error: "Video is not ready yet",
+          error: `Unexpected status: ${job.status}`,
           status: job.status,
         },
         { status: 400 }
       );
     }
 
-    // Artifact ID se download URL fetch karo
-    const artifactName = `video-${jobId}`;
+    // ✅ Step 3: Artifact fetch karo (multiple name variations try karo)
+    const artifactNames = [
+      ARTIFACT_NAME,
+      `video-${jobId}`,
+      `${jobId}.mp4`,
+      "final_video.mp4",
+      "output.mp4",
+      "video",
+      "video-artifact",
+    ];
 
-    // GitHub artifacts list fetch karo
-    const listUrl = `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts?per_page=50`;
+    const listUrl = `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts?per_page=100`;
     const listResponse = await fetch(listUrl, {
       headers: {
         Accept: "application/vnd.github+json",
@@ -64,41 +100,53 @@ export async function GET(req: NextRequest) {
     }
 
     const listData = await listResponse.json();
-    const artifact = listData.artifacts?.find(
-      (a: { name: string; expired: boolean }) =>
-        a.name === artifactName && !a.expired
-    );
+    
+    // ✅ Multiple names try karo
+    let artifact = null;
+    let foundName = "";
+    
+    for (const name of artifactNames) {
+      const found = listData.artifacts?.find(
+        (a: { name: string; expired: boolean }) =>
+          a.name === name && !a.expired
+      );
+      if (found) {
+        artifact = found;
+        foundName = name;
+        break;
+      }
+    }
 
+    // ✅ Agar artifact nahi mila, toh saare available artifacts show karo (debugging)
     if (!artifact) {
+      const availableArtifacts = listData.artifacts?.map((a: any) => a.name) || [];
       return NextResponse.json(
         {
-          error:
-            "Artifact not found or expired. GitHub artifacts expire after 90 days.",
-          artifactName,
+          error: "Artifact not found or expired. GitHub artifacts expire after 90 days.",
+          searchedNames: artifactNames,
+          availableArtifacts: availableArtifacts,
+          message: "Check your GitHub Actions workflow artifact name",
         },
         { status: 404 }
       );
     }
 
-    // Download URL generate karo
-    // Note: GitHub artifact download requires redirect - we proxy it
+    // ✅ Step 4: Success - Return download info
     const downloadUrl = `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts/${artifact.id}/zip`;
 
-    // Artifact info return karo with download instructions
     return NextResponse.json({
       success: true,
       jobId,
       artifactId: String(artifact.id),
-      artifactName,
+      artifactName: foundName,
       artifactSize: artifact.size_in_bytes,
       artifactSizeMB: (artifact.size_in_bytes / (1024 * 1024)).toFixed(1),
       expiresAt: artifact.expires_at,
       downloadUrl,
-      // Direct browser download link (requires auth)
       githubDownloadUrl: `https://github.com/${GITHUB_REPO}/actions/runs/${job.workflowRunId}/artifacts/${artifact.id}`,
-      // Instructions
-      note: "Use the githubDownloadUrl to download directly from GitHub (you must be logged in to GitHub)",
+      note: "Use POST method or githubDownloadUrl to actually download the file",
     });
+    
   } catch (error) {
     console.error("Download artifact error:", error);
     return NextResponse.json(
@@ -108,22 +156,63 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// POST: Direct artifact download proxy
+// ✅ POST: Direct artifact download proxy (IMPROVED)
 export async function POST(req: NextRequest) {
   try {
     const { jobId } = await req.json();
 
-    if (!jobId || !GITHUB_TOKEN) {
+    if (!jobId) {
       return NextResponse.json(
-        { error: "Missing jobId or token" },
+        { error: "jobId is required" },
         { status: 400 }
       );
     }
 
-    const artifactName = `video-${jobId}`;
+    if (!GITHUB_TOKEN) {
+      return NextResponse.json(
+        { error: "GITHUB_TOKEN not configured" },
+        { status: 500 }
+      );
+    }
 
-    // Artifact list fetch karo
-    const listUrl = `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts?per_page=50`;
+    // ✅ Pehle DB se status check karo
+    const [job] = await db.select().from(jobs).where(eq(jobs.id, jobId));
+
+    if (!job) {
+      return NextResponse.json({ error: "Job not found" }, { status: 404 });
+    }
+
+    if (job.status === "queued" || job.status === "in_progress") {
+      return NextResponse.json(
+        {
+          error: "Video is still being generated",
+          status: job.status,
+        },
+        { status: 202 } // ✅ 202 Accepted
+      );
+    }
+
+    if (job.status !== "completed") {
+      return NextResponse.json(
+        {
+          error: `Job status is ${job.status}, cannot download`,
+        },
+        { status: 400 }
+      );
+    }
+
+    // ✅ Multiple artifact names try karo
+    const artifactNames = [
+      ARTIFACT_NAME,
+      `video-${jobId}`,
+      `${jobId}.mp4`,
+      "final_video.mp4",
+      "output.mp4",
+      "video",
+      "video-artifact",
+    ];
+
+    const listUrl = `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts?per_page=100`;
     const listResponse = await fetch(listUrl, {
       headers: {
         Accept: "application/vnd.github+json",
@@ -140,16 +229,33 @@ export async function POST(req: NextRequest) {
     }
 
     const listData = await listResponse.json();
-    const artifact = listData.artifacts?.find(
-      (a: { name: string; expired: boolean }) =>
-        a.name === artifactName && !a.expired
-    );
-
-    if (!artifact) {
-      return NextResponse.json({ error: "Artifact not found" }, { status: 404 });
+    
+    // ✅ Multiple names try karo
+    let artifact = null;
+    for (const name of artifactNames) {
+      const found = listData.artifacts?.find(
+        (a: { name: string; expired: boolean }) =>
+          a.name === name && !a.expired
+      );
+      if (found) {
+        artifact = found;
+        break;
+      }
     }
 
-    // Artifact download karo (ZIP format)
+    if (!artifact) {
+      const availableArtifacts = listData.artifacts?.map((a: any) => a.name) || [];
+      return NextResponse.json(
+        {
+          error: "Artifact not found",
+          searchedNames: artifactNames,
+          availableArtifacts: availableArtifacts,
+        },
+        { status: 404 }
+      );
+    }
+
+    // ✅ Artifact download karo
     const downloadResponse = await fetch(
       `https://api.github.com/repos/${GITHUB_REPO}/actions/artifacts/${artifact.id}/zip`,
       {
@@ -169,7 +275,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Stream the ZIP file to client
+    // ✅ ZIP file stream karo
     const blob = await downloadResponse.arrayBuffer();
 
     return new NextResponse(blob, {
@@ -179,6 +285,7 @@ export async function POST(req: NextRequest) {
         "Content-Length": String(blob.byteLength),
       },
     });
+    
   } catch (error) {
     console.error("Proxy download error:", error);
     return NextResponse.json(
