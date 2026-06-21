@@ -26,94 +26,140 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
-    // Agar job already completed ya failed hai
-    if (job.status === "completed" || job.status === "failed") {
+    // ✅ Agar job already completed ya failed hai
+    if (job.status === "completed") {
       return NextResponse.json({
         jobId: job.id,
-        status: job.status,
+        status: "completed",
         workflowRunId: job.workflowRunId,
         artifactId: job.artifactId,
         artifactUrl: job.artifactUrl,
         errorMessage: job.errorMessage,
         createdAt: job.createdAt,
         completedAt: job.completedAt,
-        steps: getStepsForStatus(job.status),
+        steps: getStepsForStatus("completed"),
       });
     }
 
-    // GitHub API se live status check karo
-    let githubStatus = null;
-    let workflowSteps: WorkflowStep[] = [];
+    if (job.status === "failed") {
+      return NextResponse.json({
+        jobId: job.id,
+        status: "failed",
+        errorMessage: job.errorMessage || "Workflow failed",
+        workflowRunId: job.workflowRunId,
+        createdAt: job.createdAt,
+        completedAt: job.completedAt,
+        steps: getStepsForStatus("failed"),
+      });
+    }
 
-    if (GITHUB_TOKEN) {
-      // Agar workflow run ID nahi hai, latest run fetch karo
-      let runId = job.workflowRunId;
+    // ✅ Agar GITHUB_TOKEN nahi hai toh DB status return karo
+    if (!GITHUB_TOKEN) {
+      return NextResponse.json({
+        jobId: job.id,
+        status: job.status || "queued",
+        message: "GITHUB_TOKEN not configured. Check .env file.",
+        steps: getStepsForStatus(job.status || "queued"),
+        createdAt: job.createdAt,
+      });
+    }
 
-      if (!runId) {
-        runId = await fetchLatestRunId(job.id);
-        if (runId) {
-          await db
-            .update(jobs)
-            .set({ workflowRunId: runId, status: "in_progress" })
-            .where(eq(jobs.id, jobId));
-        }
-      }
+    // ✅ GitHub se latest run fetch karo
+    let runId = job.workflowRunId;
+    let runData = null;
+    let steps: WorkflowStep[] = [];
 
-      if (runId) {
-        const runData = await fetchWorkflowRun(runId);
-        if (runData) {
-          githubStatus = runData.status;
-          workflowSteps = await fetchWorkflowSteps(runId);
-
-          // Status update karo
-          if (runData.status === "completed") {
-            const conclusion = runData.conclusion;
-            const newStatus = conclusion === "success" ? "completed" : "failed";
-
-            // Artifact fetch karo agar success hai
-            let artifactData = null;
-            if (newStatus === "completed") {
-              artifactData = await fetchArtifact(job.id);
-            }
-
-            await db
-              .update(jobs)
-              .set({
-                status: newStatus,
-                completedAt: new Date(),
-                artifactId: artifactData?.id ? String(artifactData.id) : null,
-                errorMessage:
-                  conclusion !== "success"
-                    ? `Workflow ${conclusion}`
-                    : null,
-              })
-              .where(eq(jobs.id, jobId));
-
-            return NextResponse.json({
-              jobId: job.id,
-              status: newStatus,
-              workflowRunId: runId,
-              artifactId: artifactData?.id ? String(artifactData.id) : null,
-              githubRunUrl: runData.html_url,
-              conclusion: conclusion,
-              steps: workflowSteps,
-              createdAt: job.createdAt,
-              completedAt: new Date(),
-            });
-          }
-        }
+    // Agar workflowRunId nahi hai, toh latest run fetch karo
+    if (!runId) {
+      const latestRunId = await fetchLatestRunId(jobId);
+      if (latestRunId) {
+        runId = latestRunId;
+        // ✅ Database update karo
+        await db
+          .update(jobs)
+          .set({ 
+            workflowRunId: runId,
+            status: "in_progress" 
+          })
+          .where(eq(jobs.id, jobId));
       }
     }
 
+    // Agar runId mil gaya toh status fetch karo
+    if (runId) {
+      runData = await fetchWorkflowRun(runId);
+      if (runData) {
+        steps = await fetchWorkflowSteps(runId);
+
+        // ✅ GitHub status ko database status mein map karo
+        let dbStatus = job.status;
+        let isCompleted = false;
+        let isFailed = false;
+
+        if (runData.status === "completed") {
+          if (runData.conclusion === "success") {
+            dbStatus = "completed";
+            isCompleted = true;
+          } else {
+            dbStatus = "failed";
+            isFailed = true;
+          }
+        } else if (runData.status === "in_progress") {
+          dbStatus = "in_progress";
+        } else if (runData.status === "queued") {
+          dbStatus = "queued";
+        }
+
+        // ✅ Agar status change hua hai toh database update karo
+        if (dbStatus !== job.status) {
+          const updateData: any = { status: dbStatus };
+          if (isCompleted) {
+            updateData.completedAt = new Date();
+            // ✅ Artifact fetch karo
+            const artifact = await fetchArtifact(jobId);
+            if (artifact) {
+              updateData.artifactId = String(artifact.id);
+              updateData.artifactUrl = artifact.archive_download_url;
+            }
+          }
+          if (isFailed) {
+            updateData.errorMessage = runData.conclusion || "Workflow failed";
+            updateData.completedAt = new Date();
+          }
+          await db
+            .update(jobs)
+            .set(updateData)
+            .where(eq(jobs.id, jobId));
+        }
+
+        // ✅ Response return karo
+        return NextResponse.json({
+          jobId: job.id,
+          status: dbStatus,
+          workflowRunId: runId,
+          githubStatus: runData.status,
+          githubConclusion: runData.conclusion,
+          githubRunUrl: runData.html_url,
+          steps: steps.length > 0 ? steps : getStepsForStatus(dbStatus),
+          artifactId: job.artifactId,
+          errorMessage: job.errorMessage,
+          createdAt: job.createdAt,
+          completedAt: job.completedAt,
+          message: getStatusMessage(dbStatus),
+        });
+      }
+    }
+
+    // ✅ Agar GitHub se kuch nahi mila, DB status return karo
     return NextResponse.json({
       jobId: job.id,
-      status: job.status,
+      status: job.status || "queued",
       workflowRunId: job.workflowRunId,
-      githubStatus,
-      steps: workflowSteps.length > 0 ? workflowSteps : getStepsForStatus(job.status),
+      steps: getStepsForStatus(job.status || "queued"),
+      message: getStatusMessage(job.status || "queued"),
       createdAt: job.createdAt,
-      message: getStatusMessage(job.status),
     });
+
   } catch (error) {
     console.error("Workflow status error:", error);
     return NextResponse.json(
@@ -148,7 +194,14 @@ async function fetchLatestRunId(jobId: string): Promise<string | null> {
     const data = await response.json();
     const runs = data.workflow_runs || [];
 
-    // Most recent run return karo
+    // ✅ Job ID se matching run dhoondho (inputs mein job_id check karo)
+    for (const run of runs) {
+      if (run.inputs && run.inputs.job_id === jobId) {
+        return String(run.id);
+      }
+    }
+
+    // Agar match nahi mila, toh most recent return karo
     if (runs.length > 0) {
       return String(runs[0].id);
     }
@@ -222,7 +275,6 @@ async function fetchArtifact(jobId: string) {
     const data = await response.json();
     const artifacts = data.artifacts || [];
 
-    // Job ID wala artifact dhundo
     const artifact = artifacts.find(
       (a: { name: string }) => a.name === `video-${jobId}`
     );
@@ -255,10 +307,20 @@ function getStepsForStatus(status: string): WorkflowStep[] {
     "Upload Video Artifact",
   ];
 
+  const statusMap: Record<string, string> = {
+    completed: "completed",
+    failed: "failed",
+    in_progress: "in_progress",
+    queued: "queued",
+  };
+
+  const stepStatus = statusMap[status] || "queued";
+  const stepConclusion = status === "completed" ? "success" : status === "failed" ? "failure" : null;
+
   return allSteps.map((name, i) => ({
     name,
-    status: status === "completed" ? "completed" : status === "queued" ? "queued" : "in_progress",
-    conclusion: status === "completed" ? "success" : null,
+    status: stepStatus,
+    conclusion: stepConclusion,
     number: i + 1,
   }));
 }
