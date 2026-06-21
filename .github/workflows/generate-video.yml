@@ -132,16 +132,46 @@ jobs:
             exit 1
           fi
 
-      # ── Step 11: Artifact upload karo ─────────────────────────────────────
-      - name: Upload Video Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: video-${{ inputs.job_id }}
-          path: /tmp/work/output/final_video.mp4
-          retention-days: 90
-          if-no-files-found: error
+      # ── Step 11: Upload to file.io (Fast & Free) ─────────────────────────
+      - name: Upload Video to file.io
+        run: |
+          echo "☁️ Uploading video to file.io..."
+          
+          # Install requests (if not already installed)
+          pip install requests
+          
+          # Upload karo
+          python python/upload_to_drive.py \
+            "/tmp/work/output/final_video.mp4" \
+            "${{ inputs.drive_folder_id }}" \
+            "${{ inputs.job_id }}"
+          
+          # Check karo link generate hua
+          if [ -f "/tmp/work/output/download_link.txt" ]; then
+            LINK=$(cat /tmp/work/output/download_link.txt)
+            echo "✅ Video uploaded successfully!"
+            echo "📥 Download Link: $LINK"
+            echo "DOWNLOAD_LINK=$LINK" >> $GITHUB_ENV
+          else
+            echo "❌ Upload failed - download_link.txt not found"
+            exit 1
+          fi
 
-      # ── Step 12: Job metadata save karo ───────────────────────────────────
+      # ── Step 12: Download link ko show karo ──────────────────────────────
+      - name: Show Download Link
+        run: |
+          echo "========================================"
+          echo "🎬 VIDEO READY FOR DOWNLOAD"
+          echo "========================================"
+          if [ -f "/tmp/work/output/download_link.txt" ]; then
+            LINK=$(cat /tmp/work/output/download_link.txt)
+            echo "🔗 $LINK"
+          fi
+          echo "========================================"
+          echo "⏰ Video expires in 24 hours on file.io"
+          echo "========================================"
+
+      # ── Step 13: Job metadata save karo ───────────────────────────────────
       - name: Save Job Metadata
         run: |
           cat > /tmp/work/job_info.json << EOF
@@ -149,14 +179,14 @@ jobs:
             "job_id": "${{ inputs.job_id }}",
             "status": "completed",
             "run_id": "${{ github.run_id }}",
-            "artifact_name": "video-${{ inputs.job_id }}",
+            "download_link": "$(cat /tmp/work/output/download_link.txt 2>/dev/null || echo 'N/A')",
             "language": "${{ inputs.language }}"
           }
           EOF
           echo "✅ Job metadata saved"
           cat /tmp/work/job_info.json
 
-      # ── Step 13: Failure handling ──────────────────────────────────────────
+      # ── Step 14: Failure handling ──────────────────────────────────────────
       - name: Handle Failure
         if: failure()
         run: |
