@@ -43,7 +43,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      # ── Step 3: FFmpeg install (Ubuntu mein free available) ────────────────
+      # ── Step 3: FFmpeg install ─────────────────────────────────────────────
       - name: Install FFmpeg
         run: |
           sudo apt-get update -qq
@@ -132,32 +132,44 @@ jobs:
             exit 1
           fi
 
-      # ── Step 11: Upload to file.io (Fast & Free) ─────────────────────────
-      - name: Upload Video to file.io
+      # ── Step 11: Upload to 0x0.st with curl (Reliable, 10 min timeout) ──
+      - name: Upload Video to 0x0.st
         run: |
-          echo "☁️ Uploading video to file.io..."
+          echo "☁️ Uploading video to 0x0.st..."
           
-          # Install requests (if not already installed)
-          pip install requests
+          # 10 minute timeout ke sath upload karo
+          curl --connect-timeout 60 --max-time 600 -F "file=@/tmp/work/output/final_video.mp4" \
+            https://0x0.st -o /tmp/work/output/upload_response.txt
           
-          # Upload karo
-          python python/upload_to_drive.py \
-            "/tmp/work/output/final_video.mp4" \
-            "${{ inputs.drive_folder_id }}" \
-            "${{ inputs.job_id }}"
+          # Response mein link hoga
+          LINK=$(cat /tmp/work/output/upload_response.txt)
           
-          # Check karo link generate hua
-          if [ -f "/tmp/work/output/download_link.txt" ]; then
-            LINK=$(cat /tmp/work/output/download_link.txt)
-            echo "✅ Video uploaded successfully!"
-            echo "📥 Download Link: $LINK"
+          if [[ "$LINK" == http* ]]; then
+            echo "✅ Upload Successful!"
+            echo "🔗 Download Link: $LINK"
+            echo "$LINK" > /tmp/work/output/download_link.txt
             echo "DOWNLOAD_LINK=$LINK" >> $GITHUB_ENV
           else
-            echo "❌ Upload failed - download_link.txt not found"
-            exit 1
+            echo "❌ Upload failed. Response: $LINK"
+            echo "⚠️ Trying transfer.sh as fallback..."
+            
+            # Fallback: transfer.sh (14 days valid)
+            curl --connect-timeout 60 --max-time 600 --upload-file /tmp/work/output/final_video.mp4 \
+              "https://transfer.sh/video_${{ inputs.job_id }}.mp4" -o /tmp/work/output/upload_response.txt
+            
+            LINK=$(cat /tmp/work/output/upload_response.txt)
+            if [[ "$LINK" == http* ]]; then
+              echo "✅ Upload Successful (fallback)!"
+              echo "🔗 Download Link: $LINK"
+              echo "$LINK" > /tmp/work/output/download_link.txt
+              echo "DOWNLOAD_LINK=$LINK" >> $GITHUB_ENV
+            else
+              echo "❌ Both upload methods failed."
+              exit 1
+            fi
           fi
 
-      # ── Step 12: Download link ko show karo ──────────────────────────────
+      # ── Step 12: Show Download Link ────────────────────────────────────────
       - name: Show Download Link
         run: |
           echo "========================================"
@@ -168,7 +180,7 @@ jobs:
             echo "🔗 $LINK"
           fi
           echo "========================================"
-          echo "⏰ Video expires in 24 hours on file.io"
+          echo "⏰ Link valid for 14 days (transfer.sh) or 30 days (0x0.st)"
           echo "========================================"
 
       # ── Step 13: Job metadata save karo ───────────────────────────────────
